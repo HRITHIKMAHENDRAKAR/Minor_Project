@@ -4,15 +4,13 @@ import librosa
 import numpy as np
 from .config import SAMPLE_RATE, N_MELS, N_FFT, HOP_LENGTH
 
-
 class FeatureExtractor:
 
     def waveform_to_mel(self, audio):
         """
-        Step 6:
-        Convert waveform → Log-Mel spectrogram
+        Convert waveform to a normalized Log-Mel spectrogram.
+        Perfect format for training custom 2D CNN classifiers.
         """
-
         mel = librosa.feature.melspectrogram(
             y=audio,
             sr=SAMPLE_RATE,
@@ -23,7 +21,7 @@ class FeatureExtractor:
 
         mel_db = librosa.power_to_db(mel, ref=np.max)
 
-        # Optional normalization (stabilizes CNN training)
+        # Standardization (stabilizes CNN training)
         mel_db = (mel_db - mel_db.mean()) / (mel_db.std() + 1e-6)
 
         return mel_db

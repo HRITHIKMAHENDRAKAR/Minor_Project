@@ -3,3 +3,9 @@ numpy
 soundfile
 tqdm
 scikit-learn
+birdnetlib
+resampy
+pandas
+streamlit
+wikipedia
+tensorflow
