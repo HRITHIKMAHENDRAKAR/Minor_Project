@@ -4,11 +4,46 @@ import pandas as pd
 from tqdm import tqdm
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
+import librosa
+import numpy as np
 
-def main(lat=None, lon=None, week=-1, n_sources=2):
-    print("Loading BirdNET Analyzer... (This might take a moment to download the model if it's the first time)")
+try:
+    import tensorflow as tf
+    import tensorflow_hub as hub
+    import csv
+    COUNCIL_AVAILABLE = True
+except ImportError:
+    COUNCIL_AVAILABLE = False
+    print("Warning: TensorFlow or TF-Hub not found. Running only with BirdNET (Lead).")
+
+def main(lat=None, lon=None, week=-1, n_sources=2, run_id="None"):
+    print("Loading BirdNET Analyzer (Lead Model)...")
     analyzer = Analyzer()
     print("BirdNET loaded!")
+    
+    yamnet_model = None
+    yamnet_classes = []
+    perch_model = None
+    
+    if COUNCIL_AVAILABLE:
+        print("Loading YAMNet (The Noise Validator)...")
+        try:
+            yamnet_model = hub.load('https://tfhub.dev/google/yamnet/1')
+            class_map_path = yamnet_model.class_map_path().numpy().decode('utf-8')
+            with open(class_map_path) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    yamnet_classes.append(row['display_name'])
+            print("YAMNet loaded!")
+        except Exception as e:
+            print(f"Failed to load YAMNet: {e}")
+            
+        print("Loading Google Perch (The Peer Reviewer)...")
+        try:
+            perch_model = hub.load("https://tfhub.dev/google/bird-vocalization-classifier/4")
+            print("Perch loaded!")
+        except Exception as e:
+            print(f"Failed to load Perch: {e}")
 
     PROCESSED_DIR = "processed"
     
@@ -77,11 +112,52 @@ def main(lat=None, lon=None, week=-1, n_sources=2):
                     )
                     recording.analyze()
                     
+                    # === COUNCIL OF MODELS VOTE ===
+                    yamnet_multiplier = 1.0
+                    perch_boost = 0.0
+                    
+                    if COUNCIL_AVAILABLE and (yamnet_model is not None or perch_model is not None):
+                        try:
+                            # 1. YAMNet Validation
+                            if yamnet_model is not None:
+                                y_16k, _ = librosa.load(path, sr=16000, mono=True)
+                                y_16k = np.clip(y_16k, -1.0, 1.0)
+                                scores, _, _ = yamnet_model(y_16k)
+                                avg_scores = np.mean(scores.numpy(), axis=0)
+                                top_class_id = np.argmax(avg_scores)
+                                top_class_name = yamnet_classes[top_class_id].lower()
+                                
+                                bird_kws = ['bird', 'animal', 'wildlife', 'chirp', 'squawk', 'owl', 'crow', 'pigeon', 'sparrow']
+                                noise_kws = ['engine', 'truck', 'car', 'machine', 'motor', 'vehicle', 'noise', 'static', 'wind', 'music', 'speech']
+                                
+                                if any(kw in top_class_name for kw in noise_kws):
+                                    yamnet_multiplier = 0.6  # Penalize if it sounds like noise/machinery
+                                elif any(kw in top_class_name for kw in bird_kws):
+                                    yamnet_multiplier = 1.2  # Reward if YAMNet agrees it's a bird
+                                    
+                            # 2. Perch Validation
+                            if perch_model is not None:
+                                y_32k, _ = librosa.load(path, sr=32000, mono=True)
+                                frame_step = 32000 * 5 # check first 5 seconds for fast peer review
+                                if len(y_32k) > frame_step:
+                                    y_32k = y_32k[:frame_step]
+                                else:
+                                    y_32k = np.pad(y_32k, (0, max(0, frame_step - len(y_32k))))
+                                logits = perch_model.infer_tf(tf.constant(y_32k[tf.newaxis, :]))[0]['predictions']
+                                max_perch_conf = np.max(tf.nn.softmax(logits).numpy())
+                                if max_perch_conf > 0.5:
+                                    perch_boost = 0.05 # Add a flat +5% confidence if Perch is also highly confident
+                        except Exception as e:
+                            pass # Failsafe against council errors
+
                     # Search through BirdNET's detections
                     target_score_for_stem = 0.0
                     for detection in recording.detections:
                         species = detection['scientific_name']
                         conf = detection['confidence']
+                        
+                        # Apply Council Adjustments
+                        conf = min(1.0, (conf * yamnet_multiplier) + perch_boost)
                         
                         # Temporal Voting: Sum Confidences across chunks and sources
                         species_temporal_scores[species] = species_temporal_scores.get(species, 0.0) + conf
@@ -118,6 +194,7 @@ def main(lat=None, lon=None, week=-1, n_sources=2):
                 
                 res_dict = {
                     "Filename": base_name,
+                    "Run_ID": run_id,
                     "True_Species": species_clean,
                     "Top_Predicted_Species": overall_top_species,
                     "Top_Prediction_Confidence": overall_top_score_any,
