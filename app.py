@@ -83,6 +83,60 @@ def clear_directory(dir_path):
         shutil.rmtree(dir_path)
     os.makedirs(dir_path, exist_ok=True)
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_wikipedia_info(species_name):
+    import wikipedia
+    # Improve search: Try exact scientific name first, then fallback to adding "bird"
+    search_queries = [species_name, species_name + " bird"]
+    
+    for query in search_queries:
+        try:
+            search_results = wikipedia.search(query)
+            if not search_results:
+                continue
+                
+            page = wikipedia.page(search_results[0], auto_suggest=False)
+            summary = wikipedia.summary(search_results[0], sentences=3)
+            
+            # Find a valid image (ignore SVGs and generic wiki icons)
+            image_url = None
+            if hasattr(page, 'images') and page.images:
+                for img in page.images:
+                    img_lower = img.lower()
+                    if img_lower.endswith(('.jpg', '.jpeg', '.png')) and "commons-logo" not in img_lower and "wikiquote" not in img_lower:
+                        image_url = img
+                        break
+                    
+            return {
+                "summary": summary,
+                "url": page.url,
+                "image_url": image_url,
+                "title": page.title
+            }
+        except wikipedia.exceptions.DisambiguationError as e:
+            try:
+                page = wikipedia.page(e.options[0], auto_suggest=False)
+                summary = wikipedia.summary(e.options[0], sentences=3)
+                image_url = None
+                if hasattr(page, 'images') and page.images:
+                    for img in page.images:
+                        img_lower = img.lower()
+                        if img_lower.endswith(('.jpg', '.jpeg', '.png')) and "commons-logo" not in img_lower and "wikiquote" not in img_lower:
+                            image_url = img
+                            break
+                return {
+                    "summary": summary,
+                    "url": page.url,
+                    "image_url": image_url,
+                    "title": page.title
+                }
+            except:
+                pass
+        except Exception:
+            pass
+            
+    return None
+
 if uploaded_file is not None:
     st.audio(uploaded_file, format='audio/wav')
     
@@ -223,23 +277,17 @@ if uploaded_file is not None:
                                 
                             st.subheader(f"📖 About the {species}")
                             with st.spinner(f"Fetching {species}..."):
-                                try:
-                                    search_results = wikipedia.search(species + " bird")
-                                    if search_results:
-                                        page = wikipedia.page(search_results[0], auto_suggest=False)
-                                        st.write(wikipedia.summary(search_results[0], sentences=3))
-                                        st.markdown(f"**[Read more on Wikipedia]({page.url})**")
-                                    else:
-                                        st.info("No detailed Wikipedia information found.")
-                                except wikipedia.exceptions.DisambiguationError as e:
-                                    st.warning(f"Multiple matches found for {species}. Displaying first:")
-                                    try:
-                                        page = wikipedia.page(e.options[0], auto_suggest=False)
-                                        st.write(wikipedia.summary(e.options[0], sentences=3))
-                                    except:
-                                        pass
-                                except Exception:
-                                    st.error(f"Error fetching Wikipedia info for {species}.")
+                                wiki_data = fetch_wikipedia_info(species)
+                                
+                                if wiki_data:
+                                    # Output the image if found
+                                    if wiki_data.get("image_url"):
+                                        st.image(wiki_data["image_url"], caption=wiki_data.get("title", species), use_container_width=True)
+                                        
+                                    st.write(wiki_data["summary"])
+                                    st.markdown(f"**[Read more on Wikipedia]({wiki_data['url']})**")
+                                else:
+                                    st.info(f"No detailed Wikipedia information found for {species}.")
                             st.markdown("---")
                                 
                     with col_table:
