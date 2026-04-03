@@ -1,0 +1,17 @@
+streamlit
+pandas
+wikipedia
+plotly
+librosa
+numpy
+tqdm
+birdnetlib
+soundfile
+scipy
+scikit-learn
+audio-separator[cpu]
+torch
+torchaudio
+typeguard==4.3.0
+tensorflow
+tensorflow-hub
