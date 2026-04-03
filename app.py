@@ -5,100 +5,109 @@ import subprocess
 import pandas as pd
 import wikipedia
 import sys
+import uuid
+import json
+import librosa
+import numpy as np
 
-st.set_page_config(page_title="Bird Audio Species Detector", page_icon="🐦", layout="wide")
+# Setup full width layout and default sidebar state
+st.set_page_config(page_title="Bird Audio Species Detector", page_icon="🐦", layout="wide", initial_sidebar_state="collapsed")
 
+# 1. Custom Theme & Glassmorphism Injection (Plotly + CSS)
 st.markdown("""
 <style>
-    /* Dark Mode Glassmorphism Aesthetic */
+    /* Premium background mimicking the dark forest aesthetic with Deep Indigo wash */
     .stApp {
-        background-color: #0f172a;
-        color: #e2e8f0;
+        background: linear-gradient(rgba(10, 14, 26, 0.85), rgba(10, 14, 26, 0.95)), 
+                    url("https://images.unsplash.com/photo-1542273917363-3b1817f69a2d?q=80&w=2674&auto=format&fit=crop");
+        background-size: cover;
+        background-attachment: fixed;
+        color: #FFFFFF;
         font-family: 'Inter', sans-serif;
     }
     
-    /* Sleek gradient buttons */
-    .stButton>button {
-        width: 100%;
-        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-        color: white;
+    header { visibility: hidden; }
+
+    /* The "div:has" Glassmorphism hack from Stitch to encapsulate main columns */
+    div[data-testid="stVerticalBlock"] > div:has(div.glass-card) {
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 24px;
+        box-shadow: 0 10px 40px 0 rgba(0, 0, 0, 0.5);
+    }
+    
+    /* Result Cards */
+    .result-banner {
+        background: rgba(204, 255, 0, 0.08);
+        border-left: 5px solid #CCFF00;
+        border-radius: 12px;
+        padding: 15px 20px;
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: #CCFF00;
+        margin-bottom: 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .secondary-card {
+        background: rgba(79, 70, 229, 0.1);
+        border-left: 3px solid #4F46E5;
         border-radius: 8px;
-        padding: 12px;
-        font-weight: 700;
+        padding: 12px 18px;
+        margin-bottom: 10px;
+    }
+    
+    /* Wikipedia Card Override */
+    .wiki-card {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 15px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    /* Primary Run Action Button styling */
+    div.stButton > button {
+        background: linear-gradient(45deg, #4F46E5, #CCFF00);
+        color: #0A0E1A !important;
+        font-weight: 900;
+        letter-spacing: 0.5px;
         border: none;
-        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+        border-radius: 12px;
+        padding: 12px 24px;
         transition: all 0.3s ease;
+        text-transform: uppercase;
+        margin-top: 20px;
+        width: 100%;
+        box-shadow: 0 0 15px rgba(204, 255, 0, 0.3), inset 0 0 10px rgba(255,255,255,0.2);
     }
-    .stButton>button:hover {
+    div.stButton > button:hover {
+        box-shadow: 0 0 25px rgba(204, 255, 0, 0.7);
         transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
-        color: white;
-    }
-    
-    /* Micro-interactions on file uploader */
-    .stFileUploader {
-        border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-        background: rgba(30, 41, 59, 0.5);
-    }
-    
-    /* Make Alert/Success boxes look premium */
-    div.stAlert {
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-        background-color: rgba(30, 41, 59, 0.8) !important;
-        border-left: 5px solid;
-    }
-    
-    /* Clean headers */
-    h1, h2, h3 {
-        color: #f8fafc !important;
-        font-weight: 800;
-        letter-spacing: -0.5px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🐦 Bird Audio Species Detector")
-st.markdown("Upload a bird audio recording to run the local project pipeline. The file will be placed in the `input` directory and processed via `main.py` using NMF separation and BirdNET inference.")
-
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    uploaded_file = st.file_uploader("Upload Audio File (WAV, MP3, FLAC, OGG)", type=["wav", "mp3", "flac", "ogg"])
-
-with col2:
-    st.markdown("### Process Settings")
-    n_sources = st.slider("Number of Sources for NMF Separation", min_value=1, max_value=5, value=2, step=1)
-    
-    st.markdown("### Location Filter (Crucial for Accuracy)")
-    st.info("Limit predictions to birds native to a region (e.g., Himalayas) to eliminate impossible global guesses.")
-    enable_location = st.checkbox("Enable Geographic Filtering", value=False)
-    lat = st.number_input("Latitude", min_value=-90.0, max_value=90.0, value=28.59, disabled=not enable_location, help="Default: Himalayas") 
-    lon = st.number_input("Longitude", min_value=-180.0, max_value=180.0, value=83.94, disabled=not enable_location)
-    week = st.slider("Week of Year (-1 for all year)", min_value=-1, max_value=48, value=-1, disabled=not enable_location)
-
-def clear_directory(dir_path):
-    if os.path.exists(dir_path):
-        shutil.rmtree(dir_path)
-    os.makedirs(dir_path, exist_ok=True)
+st.title("Bird Species Detector Dashboard")
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def fetch_wikipedia_info(species_name):
     import wikipedia
-    # Improve search: Try exact scientific name first, then fallback to adding "bird"
     search_queries = [species_name, species_name + " bird"]
     
     for query in search_queries:
         try:
             search_results = wikipedia.search(query)
-            if not search_results:
-                continue
+            if not search_results: continue
                 
             page = wikipedia.page(search_results[0], auto_suggest=False)
             summary = wikipedia.summary(search_results[0], sentences=3)
             
-            # Find a valid image (ignore SVGs and generic wiki icons)
             image_url = None
             if hasattr(page, 'images') and page.images:
                 for img in page.images:
@@ -107,12 +116,7 @@ def fetch_wikipedia_info(species_name):
                         image_url = img
                         break
                     
-            return {
-                "summary": summary,
-                "url": page.url,
-                "image_url": image_url,
-                "title": page.title
-            }
+            return {"summary": summary, "url": page.url, "image_url": image_url, "title": page.title}
         except wikipedia.exceptions.DisambiguationError as e:
             try:
                 page = wikipedia.page(e.options[0], auto_suggest=False)
@@ -124,12 +128,7 @@ def fetch_wikipedia_info(species_name):
                         if img_lower.endswith(('.jpg', '.jpeg', '.png')) and "commons-logo" not in img_lower and "wikiquote" not in img_lower:
                             image_url = img
                             break
-                return {
-                    "summary": summary,
-                    "url": page.url,
-                    "image_url": image_url,
-                    "title": page.title
-                }
+                return {"summary": summary, "url": page.url, "image_url": image_url, "title": page.title}
             except:
                 pass
         except Exception:
@@ -137,192 +136,205 @@ def fetch_wikipedia_info(species_name):
             
     return None
 
-if uploaded_file is not None:
-    st.audio(uploaded_file, format='audio/wav')
+def clear_directory(dir_path):
+    if os.path.exists(dir_path): shutil.rmtree(dir_path)
+    os.makedirs(dir_path, exist_ok=True)
+
+# 3. Layout Structure
+col_left, col_right = st.columns([1, 2.5], gap="large")
+
+with col_left:
+    st.markdown('<div class="glass-card"></div>', unsafe_allow_html=True)
     
-    st.markdown("### 📊 Acoustic Data Profile")
-    with st.expander("Explore Neural Spectrogram", expanded=True):
+    st.markdown("### ⚙️ Project Settings")
+    uploaded_file = st.file_uploader("Upload Audio File (WAV, MP3)", type=["wav", "mp3", "flac", "ogg"])
+    
+    # CRITICAL FIX: Explicitly rename back to Sources, not Intensity! A value of 1 skips separation leading to dropping the prediction accuracy!
+    n_sources = st.slider("Number of NMF Sources", min_value=1, max_value=5, value=2, step=1)
+    st.caption("Splits multi-bird calls. Set to 2 or higher for best accuracy!")
+    
+    st.markdown("### 🌍 Geographic Targeting")
+    enable_location = st.checkbox("Enable Filtering", value=False)
+    
+    c_lat, c_lon = st.columns(2)
+    with c_lat: lat = st.number_input("Latitude", value=28.59, disabled=not enable_location)
+    with c_lon: lon = st.number_input("Longitude", value=83.94, disabled=not enable_location)
+    week = st.slider("Week of Year (-1 for all)", min_value=-1, max_value=48, value=-1, disabled=not enable_location)
+    
+    run_clicked = st.button("🚀 RUN ANALYSIS", use_container_width=True)
+
+with col_right:
+    st.markdown('<div class="glass-card"></div>', unsafe_allow_html=True)
+    st.subheader("Acoustic Data Profile")
+    
+    if uploaded_file is not None:
         try:
-            import librosa
-            import librosa.display
-            import matplotlib.pyplot as plt
-            import numpy as np
+            import plotly.graph_objects as go
             
             uploaded_file.seek(0)
             y, sr = librosa.load(uploaded_file, sr=22050)
-            
-            fig, ax = plt.subplots(figsize=(10, 3))
-            fig.patch.set_facecolor('#0f172a')
-            ax.set_facecolor('#0f172a')
-            
             D = librosa.amplitude_to_db(np.abs(librosa.stft(y)), ref=np.max)
-            img = librosa.display.specshow(D, y_axis='hz', x_axis='time', sr=sr, ax=ax, cmap='magma')
             
-            ax.set_title("Vocal Frequency Sweep (Neural Input)", color='white', fontsize=12)
-            ax.tick_params(colors='white', labelsize=8)
-            ax.xaxis.label.set_color('white')
-            ax.yaxis.label.set_color('white')
+            if D.shape[1] > 1200: D = D[:, ::D.shape[1]//1200]
+            if D.shape[0] > 400: D = D[::D.shape[0]//400, :]
+                
+            colorscale = [[0.0, '#0A0E1A'], [0.2, '#1e1b4b'], [0.5, '#4F46E5'], [0.8, '#a3e635'], [1.0, '#CCFF00']]
             
-            cbar = fig.colorbar(img, ax=ax, format="%+2.0f dB")
-            cbar.ax.tick_params(colors='white')
+            fig = go.Figure(data=go.Heatmap(z=D, colorscale=colorscale, showscale=False, hoverinfo='skip'))
+            fig.update_layout(
+                margin=dict(l=0, r=0, b=0, t=0),
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                height=250, yaxis=dict(showgrid=False, zeroline=False, visible=False),
+                xaxis=dict(showgrid=False, zeroline=False, visible=False)
+            )
             
-            st.pyplot(fig)
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
             uploaded_file.seek(0)
+            st.audio(uploaded_file, format='audio/wav')
+                
         except Exception as e:
-            st.warning(f"⚠️ Could not render visual spectrogram: {e}")
-            uploaded_file.seek(0)
+            st.warning(f"⚠️ Spectrogram generation skipped or failed: {e}")
             
-    if st.button("Trigger Neural Inference 🚀"):
+    else:
+        st.info("Upload an audio file on the left to seamlessly render the interactive Plotly Spectrogram.")
+        
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if run_clicked and uploaded_file is not None:
+        diagnostics = [f"[INFO] Audio Loaded: {uploaded_file.name}"]
+        
         try:
-            with st.spinner("Preparing directories and saving file..."):
+            with st.spinner("Processing deep induction..."):
                 input_dir = "input"
                 processed_dir = "processed"
                 
-                # Clear directories to ensure a fresh run
                 clear_directory(input_dir)
                 clear_directory(processed_dir)
+                os.makedirs(os.path.join(input_dir, "Unknown_Bird"), exist_ok=True)
                 
-                # Create a generic species folder for the upload
-                species_folder = os.path.join(input_dir, "Unknown_Bird")
-                os.makedirs(species_folder, exist_ok=True)
-                
-                # Save the uploaded file
-                upload_path = os.path.join(species_folder, uploaded_file.name)
+                upload_path = os.path.join(input_dir, "Unknown_Bird", uploaded_file.name)
+                uploaded_file.seek(0)
                 with open(upload_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                     
-            with st.spinner("Running main backend pipeline (`main.py`)..."):
-                import uuid
-                current_run_id = str(uuid.uuid4())
+                diagnostics.append(f"[PROCESS] Running NMF Separation (Sources: {n_sources}) ...")
                 
-                # Run the backend process with the selected n_sources and location parameters
+                current_run_id = str(uuid.uuid4())
                 cmd = [sys.executable, "main.py", "--n_sources", str(n_sources), "--run_id", current_run_id]
                 if enable_location:
                     cmd.extend(["--lat", str(lat), "--lon", str(lon), "--week", str(week)])
                 
-                process = subprocess.run(
-                    cmd,
-                    cwd=os.getcwd(),
-                    capture_output=True,
-                    text=True
-                )
+                import time
+                t0 = time.time()
+                process = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True)
+                elapsed = time.time() - t0
                 
                 if process.returncode != 0:
                     st.error("Backend process failed!")
-                    with st.expander("Show Console Error Output"):
-                        st.code(process.stderr)
+                    st.code(process.stderr)
                     st.stop()
                     
-            with st.spinner("Parsing results..."):
+                diagnostics.append(f"[SUCCESS] Native inference loop finished in {elapsed:.2f}s")
+                    
                 results_file = "prebuilt_birdnet_evaluation.csv"
-                if not os.path.exists(results_file):
-                    st.error("The backend finished but did not produce the expected CSV results file.")
+                df = pd.read_csv(results_file)
+                current_base_name = os.path.splitext(uploaded_file.name)[0]
+                
+                if "Run_ID" in df.columns:
+                    df_current = df[df["Run_ID"] == current_run_id]
+                else:
+                    df_current = df[df["Filename"] == current_base_name]
+                    
+                if len(df_current) == 0:
+                    st.error("No predictions returned.")
                     st.stop()
                     
-                df = pd.read_csv(results_file)
+                top_row = df_current.iloc[-1]
                 
-                if len(df) == 0:
-                    st.warning("Analysis completed, but no high-confidence predictions were found.")
-                else:
-                    current_base_name = os.path.splitext(uploaded_file.name)[0]
-                    
-                    if "Run_ID" in df.columns:
-                        df_current = df[df["Run_ID"] == current_run_id]
-                    else:
-                        # Fallback for old CSV rows
-                        df_current = df[df["Filename"] == current_base_name]
+                predictions = []
+                if "Top_Predictions_JSON" in top_row and isinstance(top_row["Top_Predictions_JSON"], str):
+                    try:
+                        predictions = json.loads(top_row["Top_Predictions_JSON"])
+                    except Exception:
+                        pass
+                if not predictions:
+                     predictions = [{"species": top_row.get("Top_Predicted_Species", "Unknown"), "confidence": top_row.get("Top_Prediction_Confidence", 0.0)}]
+                
+                diagnostics.append(f"[MODEL] Classifying top candidate: {predictions[0].get('species', 'Unknown')}")
+                
+                with st.expander("Show Backend Diagnostics", expanded=False):
+                    st.code("\n".join(diagnostics), language="bash")
+                
+                lead_pred = predictions[0]
+                lead_species = lead_pred.get("species", "Unknown")
+                lead_conf = float(lead_pred.get("confidence", 0.0))
+                
+                st.markdown('<div class="glass-card"></div>', unsafe_allow_html=True)
+                st.subheader("Analysis Validation Matrix")
+                
+                st.markdown(f'''
+                <div class="result-banner">
+                    <span style="display:flex; flex-direction:column;">
+                        <span style="font-size:0.8rem; color:#A1A1AA; font-weight:normal;">Probable Species:</span>
+                        <span>{lead_species}</span>
+                    </span>
+                    <span>Confidence: {(lead_conf*100):.1f}%</span>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+                if len(predictions) > 1:
+                    st.markdown("##### Secondary Signatures Detected")
+                    for i, pred in enumerate(predictions[1:], start=2):
+                        sec_species = pred.get("species", "Unknown")
+                        sec_conf = float(pred.get("confidence", 0.0))
                         
-                    if len(df_current) == 0:
-                        # CRITICAL ERROR: The backend silently bypassed predictions!
-                        st.error("The backend executed, but absolutely no results were returned for this specific run. Ensure the file contains actual audio or isn't corrupted.")
-                        st.stop()
-                        
-                    import json
-                    
-                    # We are now guaranteed to ONLY have the exact rows generated by the UUID we just passed to the backend.
-                    # This fundamentally murders any caching/ghost data from previous runs!
-                    top_row = df_current.iloc[-1]
-                    
-                    # Native Multi-Species Support: Parse JSON array of dictionaries
-                    if "Top_Predictions_JSON" in top_row and isinstance(top_row["Top_Predictions_JSON"], str):
-                        try:
-                            predictions = json.loads(top_row["Top_Predictions_JSON"])
-                        except Exception:
-                            predictions = [{"species": top_row.get("Top_Predicted_Species", "Unknown"), "confidence": top_row.get("Top_Prediction_Confidence", top_row.get("Ensemble_Score", 0.0))}]
-                    else:
-                        predictions = [{"species": top_row.get("Top_Predicted_Species", "Unknown"), "confidence": top_row.get("Top_Prediction_Confidence", top_row.get("Ensemble_Score", 0.0))}]
-                        
-                    st.markdown("## 🔎 Audio Detection Results")
-                    
-                    # Generate dynamic result cards for every detected bird
-                    for i, pred in enumerate(predictions):
+                        st.markdown(f'''
+                        <div class="secondary-card">
+                            <span style="color: #818CF8; font-weight: 700; margin-right: 10px;">#{i} Secondary Species:</span> 
+                            <span style="color: #FFFFFF;">{sec_species}</span> 
+                            <span style="color: #9CA3AF; font-size: 0.9em; float: right;">Confidence: {(sec_conf*100):.1f}%</span>
+                        </div>
+                        ''', unsafe_allow_html=True)
+                
+                st.markdown("---")
+                col_info, col_table = st.columns([1.5, 1])
+                with col_info:
+                    st.markdown('<div class="glass-card"></div>', unsafe_allow_html=True)
+                    for pred in predictions:
                         species = pred.get("species", "Unknown")
-                        conf = float(pred.get("confidence", 0.0))
+                        if species in ["None", "Unknown"]: continue
                         
-                        if conf >= 0.40:
-                            st.success(f"**#{i+1}** Probable Species: **{species}** (Confidence: **{conf:.3f}**)")
-                        else:
-                            st.warning(f"**#{i+1}** Candidate: **{species}** (Confidence: **{conf:.3f}**) - *Needs cleaner audio for certainty*")
-                            
-                    st.markdown("---")
+                        wiki_data = fetch_wikipedia_info(species)
+                        if wiki_data:
+                            st.markdown(f'''
+                            <div class="wiki-card">
+                                <h4>{species}</h4>
+                                <p style="font-size: 0.9em; color: #cbd5e1;">{wiki_data["summary"]}</p>
+                                <a href="{wiki_data['url']}" target="_blank" style="color: #CCFF00; text-decoration: none;">[Read Wikipedia Article]</a>
+                            </div>
+                            ''', unsafe_allow_html=True)
+                            if wiki_data.get("image_url"):
+                                st.image(wiki_data["image_url"], use_container_width=True)
+                                
+                with col_table:
+                    st.markdown('<div class="glass-card"></div>', unsafe_allow_html=True)
+                    st.subheader("Analysis Matrix")
+                    st.dataframe(df_current, use_container_width=True)
                     
-                    col_info, col_table = st.columns([1, 1])
+                    report_content = f"🐦 BIODIVERSITY SURVEY REPORT\n"
+                    report_content += "=" * 40 + "\n"
+                    report_content += f"Acoustic File: {uploaded_file.name}\n"
+                    for i, pred in enumerate(predictions):
+                        report_content += f"[{i+1}] {pred.get('species')} | {float(pred.get('confidence', 0.0)):.3f}\n"
                     
-                    with col_info:
-                        # Generate dynamic Wikipedia sections for every detected bird
-                        for pred in predictions:
-                            species = pred.get("species", "Unknown")
-                            if species in ["None", "Unknown"]:
-                                continue
-                                
-                            st.subheader(f"📖 About the {species}")
-                            with st.spinner(f"Fetching {species}..."):
-                                wiki_data = fetch_wikipedia_info(species)
-                                
-                                if wiki_data:
-                                    # Output the image if found
-                                    if wiki_data.get("image_url"):
-                                        st.image(wiki_data["image_url"], caption=wiki_data.get("title", species), use_container_width=True)
-                                        
-                                    st.write(wiki_data["summary"])
-                                    st.markdown(f"**[Read more on Wikipedia]({wiki_data['url']})**")
-                                else:
-                                    st.info(f"No detailed Wikipedia information found for {species}.")
-                            st.markdown("---")
-                                
-                    with col_table:
-                        st.subheader("📊 Analysis Matrix")
-                        st.dataframe(df, use_container_width=True)
-                        
-                        st.subheader("Backend Execution Log")
-                        with st.expander("View AI Diagnostics"):
-                            st.text(process.stdout)
-
-                        # Generate Interactive Download Component
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        report_content = f"🐦 BIODIVERSITY SURVEY REPORT\n"
-                        report_content += "=" * 40 + "\n"
-                        report_content += f"Acoustic File: {uploaded_file.name}\n"
-                        report_content += f"Geolocation Matrix: Lat {lat}, Lon {lon}\n"
-                        report_content += f"Sensors Verified: {n_sources} Source Arrays\n\n"
-                        report_content += "DETECTED SPECIES SIGNATURES\n"
-                        report_content += "-" * 40 + "\n"
-                        for i, pred in enumerate(predictions):
-                            species = pred.get('species', 'Unknown')
-                            conf = float(pred.get('confidence', 0.0))
-                            report_content += f"[{i+1}] {species.upper()} | Confidence Index: {conf:.3f}\n"
-                        
-                        st.download_button(
-                            label="📥 Download Secure Biodiversity Report (.txt)",
-                            data=report_content,
-                            file_name=f"{current_base_name}_survey.txt",
-                            mime="text/plain",
-                            use_container_width=True,
-                            help="Download a certified text document of these AI findings."
-                        )
-
+                    st.download_button(
+                        label="📥 Download Biodiversity Report",
+                        data=report_content,
+                        file_name=f"survey_report.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+                
         except Exception as e:
-            st.error(f"An unexpected error occurred: {e}")
-
-st.markdown("---")
-st.markdown("<div style='text-align: center; color: grey;'>Built with Streamlit • Native Pipeline Handler</div>", unsafe_allow_html=True)
+            st.error(f"Pipeline Interrupted: {e}")
